@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+
+	<head>
+		<meta charset="utf-8">
+
+		<title>Monitoring Ruby applications Heka, Grafana and a bit of aspect programming</title>
+
+		<meta name="description" content="A framework for easily creating beautiful presentations using HTML">
+		<meta name="author" content="Maciej Mensfeld">
+
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, minimal-ui">
+
+		<link rel="stylesheet" href="css/reveal.css">
+		<link rel="stylesheet" href="css/theme/black.css" id="theme">
+
+		<!-- Code syntax highlighting -->
+		<link rel="stylesheet" href="lib/css/zenburn.css">
+
+		<!-- Printing and PDF exports -->
+		<script>
+			var link = document.createElement( 'link' );
+			link.rel = 'stylesheet';
+			link.type = 'text/css';
+			link.href = window.location.search.match( /print-pdf/gi ) ? 'css/print/pdf.css' : 'css/print/paper.css';
+			document.getElementsByTagName( 'head' )[0].appendChild( link );
+		</script>
+
+		<!--[if lt IE 9]>
+		<script src="lib/js/html5shiv.js"></script>
+		<![endif]-->
+	</head>
+
+	<body>
+
+		<div class="reveal">
+
+			<!-- Any section element inside of this container is displayed as a slide -->
+			<div class="slides">
+				<section>
+					<h2>Monitoring Ruby applications with Heka and Grafana</h2>
+					<p>
+						<small>Created by
+							<a href="http://mensfeld.pl">Maciej Mensfeld</a> /
+							<a href="http://twitter.com/maciejmensfeld">@maciejmensfeld</a> /
+							<a href="http://mensfeld.pl">mensfeld.pl</a>
+						</small>
+					</p>
+				</section>
+
+				<section>
+					<section>
+						<h3>Why would you even bother?</h3>
+
+						<ul>
+							<li class="fragment">Because things not always work as they should</li>
+							<li class="fragment">Because hardware fails</li>
+							<li class="fragment">Because good performance is a constant requirement</li>
+							<li class="fragment">Because monitoring helps catching issues</li>
+						</ul>
+
+
+					</section>
+				</section>
+
+
+				<section>
+					<section>
+						<h2>But how?</h2>
+
+						<p class="fragment">It depends ;)</p>
+						<p class="fragment">There are no universal solutions</p>
+					</section>
+				</section>
+
+				<section>
+					<h2>So let's have a small test-case</h2>
+
+					<p>
+						<img src="img/strike.png" style="width:20%; border: 0; box-shadow: 0 0 0 0; background: inherit;"/>
+					</p>
+
+						<li class="fragment">SOA based architecture</li>
+						<li class="fragment">20+ applications (and many more in development)</li>
+						<li class="fragment">Few Rails based, mostly Sinatra</li>
+						<li class="fragment">JSON API based endpoints</li>
+				</section>
+
+				<section data-transition="none">
+					<h2>So let's have a small test-case</h2>
+						<li>6 internal gems used by those apps</li>
+						<li class="fragment">Moving towards zero IO apps (no writes to HDD)</li>
+						<li class="fragment">Getting ready for fully ephemeral Docker containers</li>
+						<li class="fragment">Heavy duty applications (500-700 req/s)</li>
+						<li class="fragment">Multiple databases (200GB+)</li>
+				</section>
+
+				<section data-background="#4d7e65" data-background-transition="zoom">
+					<h2>Naive approach</h2>
+					<pre><code data-trim>
+around_filter :method do |task|
+  benchmark(task.name) do
+    task.process
+  end
+end
+					</code></pre>
+
+					<pre><code data-trim>
+def benchmark(task_name)
+  t = Time.now
+  result = yield
+  # Mongoid simple object
+  Usage.create!(
+    task_name: task_name,
+    time_taken: (t.to_f - Time.now.to_f)*1000
+  )
+end
+					</code></pre>
+				</section>
+
+				<section data-background-transition="zoom">
+					<h2>Naive approach</h2>
+					<ul>
+						<li>Seemed to work</li>
+						<li class="fragment">Seemed to be fast enough</li>
+						<li class="fragment">But it wasn't :-(</li>
+						<li class="fragment">And if you forget about MongoDB TTL you end up with 500GB+ of logs</li>
+					</ul>
+				</section>
+
+				<section>
+					<h1>What would Jesus do?</h1>
+
+						<p class="fragment">He probably doesn't care ;)</p>
+				</section>
+
+				<section>
+					<h1>But mozilla does!</h1>
+
+						<blockquote>
+							Heka is an open source stream processing software system developed by Mozilla.
+							Heka is a “Swiss Army Knife” type tool for data processing
+						</blockquote>
+				</section>
+
+				<section>
+					<h3>Be friends with Heka because...</h3>
+
+						<ul>
+							<li>It works...</li>
+							<li class="fragment">... out of the box</li>
+							<li class="fragment">There's a Docker container with it</li>
+							<li class="fragment">It is fast</li>
+							<li class="fragment">It accepts statsd messaging format (via plugin)</li>
+							<li class="fragment">Accepts UDP packages</li>
+							<li class="fragment">Squashes data for you</li>
+							<li class="fragment">Works great with InfluxDB</li>
+						</ul>
+				</section>
+
+				<section>
+					<h2>So let's do this better!</h2>
+
+					<h4>We know that:</h4>
+
+					<ul>
+					<li>Storing data locally is too slow</li>
+					<li class="fragment">Storing data locally is bad</li>
+					<li class="fragment">TCP requests slow down business logic</li>
+					<li class="fragment">Some losses are acceptable (fire &amp; forget)</li>
+					<li class="fragment">Polluting business logic with monitors is bad</li>
+					</ul>
+				</section>
+
+				<section>
+					<h2></h2>
+
+					<h4>What do we really need?</h4>
+
+					<ul>
+					<li>Way to hook up to anything easily</li>
+					<li class="fragment">How often</li>
+					<li class="fragment">How fast</li>
+					<li class="fragment">How many errors</li>
+					<li class="fragment">Nice charts</li>
+					<li class="fragment">Cross app comparisons</li>
+					</ul>
+				</section>
+
+				<section>
+					<h2></h2>
+
+					<h4>What can we do?</h4>
+
+					<ul>
+					<li>Let's use AOP to wrap around monitoring logic</li>
+					<li class="fragment">UDP should be more than enough</li>
+					<li class="fragment">Heka to collect data</li>
+					<li class="fragment">InfluxDB to store it</li>
+					<li class="fragment">Grafana to graph it</li>
+					<li class="fragment">Connection pool to avoid killing GC</li>
+					<li class="fragment">Let's also wrap it as a gem :)</li>
+					</ul>
+				</section>
+
+				<section>
+					<h2>Aspect Oriented Programming</h2>
+
+					<blockquote>
+						In computing, AOP is a programming paradigm that aims to
+						increase modularity by allowing the separation of cross-cutting concerns.
+					</blockquote>
+
+					<p>
+					There are many AOP libraries for Ruby. We use <a href="https://github.com/gcao/aspector">Aspector</a>
+					</p>
+
+					<p>
+					With AOP we can create concerns that we can attach to any method of any class as a
+					<strong>before</strong>,
+					<strong>around</strong> and
+					<strong>after</strong> action.
+					</p>
+				</section>
+
+
+				<section data-background="#4d7e65" data-background-transition="zoom">
+					<h2>Simple aspect example</h2>
+
+					<pre><code data-trim>
+class Handler < BaseHandler
+  def handle
+    # Sends a UDP packet about method usage
+    Usage.increment(key)
+  end
+
+  before options[:method], aspect_arg: true do |aspect|
+    aspect.handle
+  end
+end
+
+# Counter for Sinatra app requests
+Handler.apply(App, method: :call, key: :request)
+
+# Counter for number of invokations of process method
+Handler.apply(Processor, method: :process, key: :processor)
+					</code></pre>
+				</section>
+
+				<section data-background="#4d7e65">
+					<h2>More examples</h2>
+
+					<pre><code data-trim>
+# Monitor number of invokations, time taken and number of errors
+Usage::ComplexHandler.apply(
+  App, method: :call, key: :request
+)
+Usage::ComplexHandler.apply(
+  FbService, method: :find, key: :fb_find
+)
+
+# We can always track how often do we save Mongoid objects
+Usage::IncrementHandler.apply(
+  Mongoid::Document, method: :save, key: :mg_save
+)
+					</code></pre>
+				</section>
+
+				<section>
+					<h4>Let's gra(fana)ph it!</h4>
+
+					<ul>
+					<li>Rich graphing</li>
+					<li class="fragment">Mixed styling</li>
+					<li class="fragment">Multiple dashboards</li>
+					<li class="fragment">InfluxDB query editor</li>
+					<li class="fragment">Annotations</li>
+					<li class="fragment">Multiple data sources</li>
+					<li class="fragment">JSON graph editor</li>
+					</ul>
+				</section>
+
+				<section data-background="#4d7e65">
+					<h2>JSON editor</h2>
+
+					<pre><code data-trim>
+{
+  "target": "",
+  "function": "max",
+  "column": "value",
+  "series": "stats.request.times.upper",
+  "query": "select max(value) from \"stats.request.times.upper\"",
+  "groupby_field": "",
+  "alias": "Requests time upper"
+},
+					</code></pre>
+				</section>
+
+
+				<section data-background="#4d7e65">
+				<img src="img/g1.png" style="width:100%; border: 0; box-shadow: 0 0 0 0; background: inherit;"/>
+				<img src="img/g2.png" style="width:100%; border: 0; box-shadow: 0 0 0 0; background: inherit;"/>
+				</section>
+
+				<section>
+					<h4>Downsides</h4>
+
+					<ul>
+					<li>Self maintained</li>
+					<li class="fragment">Hard to debug</li>
+					<li class="fragment">Silently fails when network issues</li>
+					<li class="fragment">Needs some configuration between components</li>
+					<li class="fragment">Won't auto addapt to application changes</li>
+					<li class="fragment">Useless for non-app (proxy, etc) level issues</li>
+					</ul>
+				</section>
+
+				<section style="text-align: left;">
+					<h1>THE END - Q &amp; A</h1>
+
+					<p>Maciej Mensfeld</p>
+
+					<p>
+						- <a href="https://github.com/gcao/aspector">Aspector</a> <br>
+						- <a href="http://hekad.readthedocs.org/">Heka</a> <br>
+						- <a href="http://influxdb.com/">InfluxDB</a> <br>
+						- <a href="http://grafana.org/">Grafana</a>
+					</p>
+				</section>
+
+			</div>
+
+		</div>
+
+		<script src="lib/js/head.min.js"></script>
+		<script src="js/reveal.js"></script>
+
+		<script>
+			Reveal.initialize({
+				controls: true,
+				progress: true,
+				history: true,
+				center: true,
+
+				transition: 'slide', // none/fade/slide/convex/concave/zoom
+
+				// Optional reveal.js plugins
+				dependencies: [
+					{ src: 'lib/js/classList.js', condition: function() { return !document.body.classList; } },
+					{ src: 'plugin/markdown/marked.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+					{ src: 'plugin/markdown/markdown.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+					{ src: 'plugin/highlight/highlight.js', async: true, condition: function() { return !!document.querySelector( 'pre code' ); }, callback: function() { hljs.initHighlightingOnLoad(); } },
+					{ src: 'plugin/zoom-js/zoom.js', async: true },
+					{ src: 'plugin/notes/notes.js', async: true }
+				]
+			});
+
+		</script>
+
+	</body>
+</html>
